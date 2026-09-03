@@ -1,0 +1,63 @@
+#pragma once
+
+// Copy to config.h and fill in the values for a new device. Do not share
+// config.h: it contains Wi-Fi, MQTT, and OTA credentials.
+const char* WIFI_SSID = "your-wifi-ssid";
+const char* WIFI_PASSWORD = "your-wifi-password";
+const char* MQTT_BROKER = "192.168.1.10";
+const uint16_t MQTT_PORT = 1883;
+const char* MQTT_USER = "mqttuser";
+const char* MQTT_PASSWORD = "mqttpass";
+const char* OTA_PASSWORD = "choose-an-ota-password";
+
+// Set all BSSID bytes to zero to disable BSSID pinning; set USE_STATIC_IP
+// false to use DHCP.
+uint8_t WIFI_BSSID[6] = {0, 0, 0, 0, 0, 0};
+const bool USE_STATIC_IP    = true;
+IPAddress STATIC_IP(192, 168, 1, 224);
+IPAddress GATEWAY(192, 168, 1, 1);
+IPAddress SUBNET(255, 255, 255, 0);
+IPAddress DNS_SERVER(192, 168, 1, 1);
+
+const char* DEVICE_ID = "temp_sensor";
+const char* DEVICE_NAME = "Temp Sensor";
+const char* DEVICE_MANUFACTURER = "P@cho";
+const char* DEVICE_MODEL = "TH-2";
+const char* DEVICE_HW_VERSION = "1.4";
+const char* FIRMWARE_VERSION = "3.6.0";
+
+const gpio_num_t SENSOR_POWER_PIN = GPIO_NUM_3;
+const gpio_num_t LED_PIN = GPIO_NUM_7;
+const gpio_num_t BATT_PIN = GPIO_NUM_1;
+const int SDA_PIN = 4;
+const int SCL_PIN = 5;
+const gpio_num_t OTA_PIN = GPIO_NUM_0;
+
+// Battery calibration is device-specific — measure your own board's raw ADC
+// reading at a few known real voltages (multimeter on the battery) and
+// replace these points. The defaults below are just a starting point.
+const float BATT_DIVIDER_RATIO = 2.0f;
+const int BATT_ADC_SAMPLES = 16;
+struct CalPoint { float raw; float actual; };
+const CalPoint BATT_CAL[] = {
+  {3.18f, 3.3f}, {3.42f, 3.5f}, {3.73f, 3.8f},
+  {3.92f, 4.0f}, {4.01f, 4.1f},
+};
+const int BATT_CAL_POINTS = sizeof(BATT_CAL) / sizeof(BATT_CAL[0]);
+const float BATTERY_LOW_THRESHOLD_PCT = 15.0f;
+const float TEMP_OFFSET_C = 0.0f;
+
+const uint64_t SLEEP_INTERVAL_US = 10ULL * 60 * 1000000ULL;
+const uint32_t EXPIRE_AFTER_SEC = (SLEEP_INTERVAL_US / 1000000ULL) * 3;
+const uint32_t OTA_WINDOW_MS = 10UL * 60 * 1000UL;
+const uint32_t AWAKE_WATCHDOG_TIMEOUT_MS = 90UL * 1000UL;
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
+const uint32_t MQTT_CONNECT_TIMEOUT_MS = 5000;
+const uint32_t MQTT_ACK_TIMEOUT_MS = 1500;
+const uint8_t MQTT_PUBLISH_RETRIES = 3;
+const uint32_t SENSOR_POWER_SETTLE_MS = 100;
+const char* NTP_SERVER = "pool.ntp.org";
+const uint32_t NTP_SYNC_TIMEOUT_MS = 5000;
+const uint32_t NTP_RESYNC_EVERY_N_BOOTS = 6;
+const bool DEBUG_MODE = false;
+const uint32_t DEBUG_BOOT_DELAY_MS = 5000;
