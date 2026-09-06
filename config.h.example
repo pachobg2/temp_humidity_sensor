@@ -33,6 +33,13 @@ const int SDA_PIN = 4;
 const int SCL_PIN = 5;
 const gpio_num_t OTA_PIN = GPIO_NUM_0;
 
+// Status LED brightness, driven via LEDC PWM instead of a plain digital
+// on/off so it can be dimmed. 100 = full brightness (original behavior).
+const uint8_t LED_BRIGHTNESS_PCT = 100;
+const uint32_t LED_PWM_FREQ_HZ = 5000;
+const uint8_t LED_PWM_RESOLUTION = 8; // 0-255
+const uint16_t LED_PWM_MAX_DUTY = (1 << LED_PWM_RESOLUTION) - 1;
+
 // Battery calibration is device-specific — measure your own board's raw ADC
 // reading at a few known real voltages (multimeter on the battery) and
 // replace these points. The defaults below are just a starting point.

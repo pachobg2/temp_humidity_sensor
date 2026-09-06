@@ -196,8 +196,8 @@ void setup() {
 
   pinMode(SENSOR_POWER_PIN, OUTPUT);
   digitalWrite(SENSOR_POWER_PIN, LOW); // ALWAYS_OFF until we explicitly power it
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  ledcAttach(LED_PIN, LED_PWM_FREQ_HZ, LED_PWM_RESOLUTION);
+  ledcWrite(LED_PIN, 0);
   pinMode(OTA_PIN, INPUT_PULLUP);
   analogSetPinAttenuation((uint8_t)BATT_PIN, ADC_11db);
 
@@ -220,7 +220,7 @@ void setup() {
       enterOtaMode();
     } else {
       Serial.println("OTA requested but WiFi failed to connect -- going back to sleep.");
-      blink(10, 20, 200); // same failure indicator as a normal failed cycle
+      blink(3, 20, 200); // same failure indicator as a normal failed cycle
     }
 
     if (DEBUG_MODE) {
@@ -304,13 +304,13 @@ void setup() {
     totalFailCount++;
   }
 
-  // LED feedback: two short blinks on success, ten quick blinks on failure.
+  // LED feedback: one short blink on success, three quick blinks on failure.
   // Skipped if we just ran the OTA flourish blink instead.
   if (!otaModeEntered) {
     if (published) {
-      blink(2, 20, 200);
+      blink(1, 20, 200);
     } else {
-      blink(10, 20, 200);
+      blink(3, 20, 200);
     }
   }
 
@@ -824,10 +824,11 @@ String resetReasonToString(esp_reset_reason_t reason) {
 // ---------------- LED / OTA ----------------
 
 void blink(int times, uint32_t onMs, uint32_t gapMs) {
+  uint32_t duty = ((uint32_t)LED_BRIGHTNESS_PCT * LED_PWM_MAX_DUTY) / 100;
   for (int i = 0; i < times; i++) {
-    digitalWrite(LED_PIN, HIGH);
+    ledcWrite(LED_PIN, duty);
     delay(onMs);
-    digitalWrite(LED_PIN, LOW);
+    ledcWrite(LED_PIN, 0);
     if (i < times - 1) delay(gapMs);
   }
 }
@@ -849,9 +850,9 @@ void enterOtaMode() {
   ArduinoOTA.setHostname(DEVICE_ID);
   ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.begin();
-  digitalWrite(LED_PIN, HIGH); // solid LED = OTA mode active
+  ledcWrite(LED_PIN, ((uint32_t)LED_BRIGHTNESS_PCT * LED_PWM_MAX_DUTY) / 100); // solid LED = OTA mode active
   runOtaWindow();
-  digitalWrite(LED_PIN, LOW);
+  ledcWrite(LED_PIN, 0);
   blink(1, 50, 50); // brief off/on/off flourish before sleeping, mirrors ota_timeout_monitor
 }
 
