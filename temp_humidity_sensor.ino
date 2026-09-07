@@ -725,8 +725,11 @@ float readBatteryVoltage() {
 float batteryPercentage(float v) {
   float pct;
 
-  if (v >= 4.20)      pct = 100.0;
-  else if (v >= 4.15) pct = 95.0 + (v - 4.15) / 0.05 * 5.0;
+  // Top capped at 4.15V, not the 4.20V charge-termination voltage: a resting,
+  // unplugged cell settles below 4.20V (surface-charge relaxation) well
+  // before it's actually due for a recharge, so 4.20V as "100%" meant the
+  // reading almost never reached 100% in practice.
+  if (v >= 4.15)      pct = 100.0;
   else if (v >= 4.10) pct = 90.0 + (v - 4.10) / 0.05 * 5.0;
   else if (v >= 4.05) pct = 85.0 + (v - 4.05) / 0.05 * 5.0;
   else if (v >= 4.00) pct = 80.0 + (v - 4.00) / 0.05 * 5.0;
