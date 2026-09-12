@@ -85,6 +85,7 @@ Base topic: `home/<DEVICE_ID>/...`
 | Battery voltage | `home/<id>/battery_voltage` |
 | Battery percent | `home/<id>/battery_percent` |
 | Low-battery flag | `home/<id>/battery_low` |
+| Last full charge date | `home/<id>/last_full_charge` |
 | WiFi signal (dBm) | `home/<id>/wifi_signal` |
 | Reset reason | `home/<id>/reset_reason` |
 | Connect fail count (resets on success) | `home/<id>/connect_fail_count` |
@@ -102,22 +103,40 @@ forever.
 
 ## Status LED
 
+Driven via LEDC PWM (not a plain digital on/off) so brightness is
+adjustable — see `LED_BRIGHTNESS_PCT` in `config.h` (0–100, default 100).
+
 | Pattern | Meaning |
 |---|---|
-| 2 short blinks | Cycle completed and published successfully |
-| 10 quick blinks | Cycle failed (WiFi, MQTT, or an unacked publish) |
+| 1 short blink | Cycle completed and published successfully |
+| 3 quick blinks | Cycle failed (WiFi, MQTT, or an unacked publish) |
 | Solid | OTA mode active |
 
 ## Config file
 
-Credentials, device identity, hardware pins, and this board's battery
-calibration all live in one `config.h` — copy `config.h.example` to
-`config.h` and fill in real values. Battery calibration (`BATT_CAL`,
-`BATT_DIVIDER_RATIO`) is genuinely per-board — the example values are just a
-starting point, not something to trust as-is.
+Credentials, device identity, hardware pins, LED brightness, and this
+board's battery calibration all live in one `config.h` — copy
+`config.h.example` to `config.h` and fill in real values. Battery
+calibration (`BATT_CAL`, `BATT_DIVIDER_RATIO`) is genuinely per-board —
+the example values are just a starting point, not something to trust
+as-is.
 
 ## DEBUG_MODE
 
 Set `DEBUG_MODE` to `true` in `config.h` to disable deep sleep after a
 cycle completes (stays connected, drops into `loop()`) — useful for serial
 debugging without waiting through the sleep interval on every iteration.
+
+## Version History
+
+`FIRMWARE_VERSION` lives in the gitignored `config.h`. Versions below
+v3.6.1 predate this changelog (pre-existing baseline); from v3.6.1 onward
+each entry is confirmed against the actual commit/request history.
+
+| Version | Date | Changes |
+|---|---|---|
+| v3.6.0 | — | Baseline before this changelog was introduced. |
+| v3.6.1 | 2026-09-06 | LED feedback changed to 1 blink success / 3 blinks failure (was 2/10); status LED switched to LEDC PWM with `LED_BRIGHTNESS_PCT` in `config.h` for adjustable brightness. |
+| v3.6.2 | 2026-09-07 | Battery percentage curve's 100% point lowered from 4.20V to 4.15V — a resting, unplugged cell settles below 4.20V well before it's actually due for a recharge. |
+| v3.6.3 | 2026-09-07 | Battery curve properly rescaled (every breakpoint proportionally compressed) instead of just flattening the top into an instant jump at 4.15V. |
+| v3.6.4 | 2026-09-12 | Last-full-charge date diagnostic (flash/NVS-backed, survives an actual battery depletion). |
