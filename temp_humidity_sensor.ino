@@ -23,6 +23,10 @@
  *   - Holding the OTA button keeps the device awake (deep sleep prevented)
  *     and starts ArduinoOTA for up to OTA_WINDOW_MS, mirroring the
  *     check_ota / ota_timeout_monitor scripts from the ESPHome config
+ *   - Records the date of the last time the battery read 100% (in flash/NVS,
+ *     not RTC memory, so it survives an actual battery depletion, not just
+ *     deep sleep) -- lets you tell how long a charge actually lasted by
+ *     comparing this date to whenever the device later goes quiet
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (bertmelis) — QoS 1 publish with broker PUBACK confirmation
@@ -35,6 +39,7 @@
 #include <Wire.h>
 #include <Adafruit_SHTC3.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -57,6 +62,7 @@ String TOPIC_OTA_REQUEST = String("home/") + DEVICE_ID + "/ota_request"; // reta
 String TOPIC_BATTERY_LOW  = String("home/") + DEVICE_ID + "/battery_low";
 String TOPIC_BOOT_COUNT   = String("home/") + DEVICE_ID + "/boot_count";
 String TOPIC_FW_VERSION = String("home/") + DEVICE_ID + "/firmware_version";
+String TOPIC_LAST_FULL_CHARGE = String("home/") + DEVICE_ID + "/last_full_charge";
 
 // Home Assistant MQTT discovery topics
 String DISCOVERY_TEMP        = String("homeassistant/sensor/") + DEVICE_ID + "/temperature/config";
@@ -72,6 +78,7 @@ String DISCOVERY_OTA_REQUEST = String("homeassistant/switch/") + DEVICE_ID + "/o
 String DISCOVERY_BATTERY_LOW  = String("homeassistant/binary_sensor/") + DEVICE_ID + "/battery_low/config";
 String DISCOVERY_BOOT_COUNT   = String("homeassistant/sensor/") + DEVICE_ID + "/boot_count/config";
 String DISCOVERY_FW_VERSION = String("homeassistant/sensor/") + DEVICE_ID + "/firmware_version/config";
+String DISCOVERY_LAST_FULL_CHARGE = String("homeassistant/sensor/") + DEVICE_ID + "/last_full_charge/config";
 
 // ---------------- Persisted state (survives deep sleep) ----------------
 
@@ -86,6 +93,7 @@ RTC_DATA_ATTR bool g_timeSynced = false; // true once any cycle has completed a 
 
 espMqttClient mqttClient;
 Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
+Preferences batteryPrefs; // flash/NVS, not RTC memory -- survives an actual battery depletion
 
 // Tracks the PUBACK for whichever single publish is currently in flight.
 // publishWithAck() only ever has one outstanding packet at a time, so a
@@ -169,6 +177,7 @@ void enterOtaMode();
 bool syncTimeUtc();
 String getCurrentTimestampUtc();
 String resetReasonToString(esp_reset_reason_t reason);
+String updateAndGetLastFullChargeDate(float batteryPercent);
 
 // ---------------- Setup / main flow ----------------
 
@@ -590,6 +599,20 @@ void sendDiscoveryConfig() {
     + devBlock + "}";
   publishWithAck(DISCOVERY_BATTERY_LOW.c_str(), battLowPayload.c_str(), true);
 
+  // Last full charge date -- device_class "date" (not "timestamp": we only
+  // ever record a calendar day, not a time-of-day). No expire_after: this
+  // is a record of a past event, not a live reading, and should stay
+  // visible even across a long gap between full charges.
+  String lastFullChargePayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Last Full Charge\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_last_full_charge\","
+    + "\"device_class\":\"date\","
+    + "\"entity_category\":\"diagnostic\","
+    + "\"icon\":\"mdi:battery-charging-100\","
+    + "\"state_topic\":\"" + TOPIC_LAST_FULL_CHARGE + "\","
+    + devBlock + "}";
+  publishWithAck(DISCOVERY_LAST_FULL_CHARGE.c_str(), lastFullChargePayload.c_str(), true);
+
   String bootCountPayload = String("{")
     + "\"name\":\"" + DEVICE_NAME + " Boot Count\","
     + "\"unique_id\":\"" + DEVICE_ID + "_boot_count\","
@@ -645,6 +668,11 @@ int publishState(float tempC, float humidity, float battV, float battPct, int rs
   bool batteryLow = battPct < BATTERY_LOW_THRESHOLD_PCT;
   if (!publishWithAck(TOPIC_BATTERY_LOW.c_str(), batteryLow ? "ON" : "OFF", true)) failed++;
 
+  String lastFullChargeDate = updateAndGetLastFullChargeDate(battPct);
+  if (lastFullChargeDate.length() > 0) {
+    if (!publishWithAck(TOPIC_LAST_FULL_CHARGE.c_str(), lastFullChargeDate.c_str(), true)) failed++;
+  }
+
   snprintf(buf, sizeof(buf), "%d", rssi);
   if (!publishWithAck(TOPIC_RSSI.c_str(), buf, true)) failed++;
 
@@ -686,6 +714,42 @@ int publishState(float tempC, float humidity, float battV, float battPct, int rs
 }
 
 // ---------------- Battery ----------------
+
+// Detects a rising edge into 100% battery (i.e. "just charged", not "still
+// sitting at 100% from before") and records today's UTC date as the new
+// last-full-charge date. Persisted in flash/NVS rather than RTC memory
+// specifically so it survives an actual battery depletion -- comparing
+// this date to whenever the device later goes quiet is how you tell how
+// long a charge actually lasted. Returns whatever date is currently
+// stored (possibly still empty, if the battery has never yet read 100%
+// since this was added).
+//
+// If the clock hasn't synced yet (g_timeSynced false) when a rising edge
+// happens, wasAt100 still gets set so this doesn't re-trigger every wake,
+// but no date gets recorded -- a one-time, cosmetic gap on a device's
+// very first-ever boot.
+String updateAndGetLastFullChargeDate(float batteryPercent) {
+  batteryPrefs.begin("battery", false);
+  bool wasAt100 = batteryPrefs.getBool("wasAt100", false);
+  bool isAt100 = batteryPercent >= 100.0f;
+
+  if (isAt100 && !wasAt100 && g_timeSynced) {
+    time_t now = time(nullptr);
+    struct tm t;
+    gmtime_r(&now, &t);
+    char buf[11];
+    strftime(buf, sizeof(buf), "%Y-%m-%d", &t);
+    batteryPrefs.putString("lastFullDate", buf);
+    Serial.printf("[battery] reached 100%% -- recorded last full charge date: %s\n", buf);
+  }
+  if (isAt100 != wasAt100) {
+    batteryPrefs.putBool("wasAt100", isAt100);
+  }
+
+  String result = batteryPrefs.getString("lastFullDate", "");
+  batteryPrefs.end();
+  return result;
+}
 
 float readBatteryVoltage() {
   // analogReadMilliVolts() uses the ESP32's factory ADC calibration (eFuse)
