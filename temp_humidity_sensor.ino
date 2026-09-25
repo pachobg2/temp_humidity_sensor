@@ -43,6 +43,7 @@
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_private/esp_clk.h" // esp_clk_rtc_time(), for uptime across deep sleep
 #include "esp32-hal-bt.h"
 #include <time.h>
 #include <sys/time.h>
@@ -62,6 +63,7 @@ String TOPIC_OTA_REQUEST = String("home/") + DEVICE_ID + "/ota_request"; // reta
 String TOPIC_BATTERY_LOW  = String("home/") + DEVICE_ID + "/battery_low";
 String TOPIC_BOOT_COUNT   = String("home/") + DEVICE_ID + "/boot_count";
 String TOPIC_FW_VERSION = String("home/") + DEVICE_ID + "/firmware_version";
+String TOPIC_UPTIME = String("home/") + DEVICE_ID + "/uptime";
 String TOPIC_LAST_FULL_CHARGE = String("home/") + DEVICE_ID + "/last_full_charge";
 
 // Home Assistant MQTT discovery topics
@@ -78,6 +80,7 @@ String DISCOVERY_OTA_REQUEST = String("homeassistant/switch/") + DEVICE_ID + "/o
 String DISCOVERY_BATTERY_LOW  = String("homeassistant/binary_sensor/") + DEVICE_ID + "/battery_low/config";
 String DISCOVERY_BOOT_COUNT   = String("homeassistant/sensor/") + DEVICE_ID + "/boot_count/config";
 String DISCOVERY_FW_VERSION = String("homeassistant/sensor/") + DEVICE_ID + "/firmware_version/config";
+String DISCOVERY_UPTIME = String("homeassistant/sensor/") + DEVICE_ID + "/uptime/config";
 String DISCOVERY_LAST_FULL_CHARGE = String("homeassistant/sensor/") + DEVICE_ID + "/last_full_charge/config";
 
 // ---------------- Persisted state (survives deep sleep) ----------------
@@ -88,6 +91,30 @@ RTC_DATA_ATTR uint32_t connectFailCount = 0; // increments on any wake that fail
 RTC_DATA_ATTR uint32_t totalFailCount = 0; // lifetime total failed wakes -- never resets, mirrors bootCount
 RTC_DATA_ATTR uint8_t cachedWifiChannel = 0; // 0 = unknown yet, let WiFi.begin() auto-select
 RTC_DATA_ATTR bool g_timeSynced = false; // true once any cycle has completed a real NTP sync
+
+// ---------------- Uptime ----------------
+// Time since the last real reset or power loss -- NOT since the last wake.
+// A deep-sleep timer/GPIO wake is a continuation of the same "up" period
+// (the device never actually lost power or restarted), so it counts; any
+// other reset reason (power-on, manual reset, brownout, watchdog, software
+// restart, a battery that died and was replaced...) zeroes it. Uses the RTC
+// counter, which keeps counting through deep sleep; millis()/esp_timer
+// don't. See initUptime(), called first thing in setup().
+RTC_DATA_ATTR uint64_t g_uptimeStartUs = 0;
+
+void initUptime() {
+  if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+    g_uptimeStartUs = esp_clk_rtc_time();
+    // Any real reset (including the restart at the end of an OTA/USB flash,
+    // which leaves RTC memory intact) re-announces discovery once, so a
+    // newly added entity actually shows up in HA without a power cycle.
+    discoverySent = false;
+  }
+}
+
+uint32_t uptimeSeconds() {
+  return (uint32_t)((esp_clk_rtc_time() - g_uptimeStartUs) / 1000000ULL);
+}
 
 // ---------------- Globals ----------------
 
@@ -194,6 +221,7 @@ void setup() {
     delay(100);
   }
 
+  initUptime();
   bootCount++;
 
   esp_reset_reason_t resetReason = esp_reset_reason();
@@ -624,6 +652,20 @@ void sendDiscoveryConfig() {
     + devBlock + "}";
   publishWithAck(DISCOVERY_BOOT_COUNT.c_str(), bootCountPayload.c_str(), true);
 
+  // Uptime -- seconds since the last real reset/power loss (deep-sleep
+  // wakes don't count as a reset, see initUptime()).
+  String uptimePayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Uptime\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_uptime\","
+    + "\"unit_of_measurement\":\"s\","
+    + "\"device_class\":\"duration\","
+    + "\"state_class\":\"measurement\","
+    + "\"entity_category\":\"diagnostic\","
+    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"state_topic\":\"" + TOPIC_UPTIME + "\","
+    + devBlock + "}";
+  publishWithAck(DISCOVERY_UPTIME.c_str(), uptimePayload.c_str(), true);
+
   // Note: no expire_after here -- this is a control, not a reading, and
   // should stay usable in the UI even if the device has been quiet a while.
   // command_topic and state_topic are the same: the device echoes the
@@ -688,6 +730,9 @@ int publishState(float tempC, float humidity, float battV, float battPct, int rs
 
   snprintf(buf, sizeof(buf), "%lu", (unsigned long)bootCount);
   if (!publishWithAck(TOPIC_BOOT_COUNT.c_str(), buf, true)) failed++;
+
+  snprintf(buf, sizeof(buf), "%lu", (unsigned long)uptimeSeconds());
+  if (!publishWithAck(TOPIC_UPTIME.c_str(), buf, true)) failed++;
 
   // NTP resync happens here, last -- after every other reading has already
   // published successfully. This way a slow or failed sync (a real network

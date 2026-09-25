@@ -91,6 +91,7 @@ Base topic: `home/<DEVICE_ID>/...`
 | Connect fail count (resets on success) | `home/<id>/connect_fail_count` |
 | Total fail count (lifetime) | `home/<id>/total_fail_count` |
 | Boot count | `home/<id>/boot_count` |
+| Uptime (zeroes on reset/power loss, keeps counting through deep sleep) | `home/<id>/uptime` | seconds |
 | Firmware version | `home/<id>/firmware_version` |
 | Last update (UTC timestamp) | `home/<id>/last_update` |
 | OTA request (retained, HA switch) | `home/<id>/ota_request` |
@@ -141,3 +142,4 @@ each entry is confirmed against the actual commit/request history.
 | v3.6.3 | 2026-09-07 | Battery curve properly rescaled (every breakpoint proportionally compressed) instead of just flattening the top into an instant jump at 4.15V. |
 | v3.6.4 | 2026-09-12 | Last-full-charge date diagnostic (flash/NVS-backed, survives an actual battery depletion). |
 | v3.6.5 | 2026-09-20 | Fixed the last-full-charge diagnostic re-triggering spuriously: a battery reading hovering right at the top of its curve (ADC noise) could bounce 99%→100%→99%→100% and record a "new" full charge on every single upward bounce. Replaced the plain `wasAt100` rising-edge flag in `updateAndGetLastFullChargeDate()` with an "armed" flag that only re-arms once the battery actually reads at or below the new `FULL_CHARGE_REARM_THRESHOLD_PCT` (default 97%, `config.h`). Applied fleet-wide to every project sharing this diagnostic (`door_sensor`, `DS_1_v3`, `TH_2_v4`, `TH_2_v4_L`, `temp_humidity_sensor_zdravkovec`). |
+| v3.6.6 | 2026-09-25 | Added an `Uptime` diagnostic sensor (seconds, `device_class: duration`): time since the last real reset or power loss -- a deep-sleep timer/button wake counts as a continuation, while power-on, manual reset, brownout, watchdog, software restart, or a dead-and-replaced battery all zero it. Uses the RTC counter (`esp_clk_rtc_time()`) since `millis()` does not survive deep sleep. Any real (non-deep-sleep) reset also re-sends the HA discovery configs once, so a newly added entity shows up after a flash without a power cycle. |
