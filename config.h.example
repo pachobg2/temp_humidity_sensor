@@ -60,8 +60,11 @@ const float BATTERY_LOW_THRESHOLD_PCT = 15.0f;
 const float FULL_CHARGE_REARM_THRESHOLD_PCT = 97.0f;
 const float TEMP_OFFSET_C = 0.0f;
 
+// DEFAULT sleep interval between readings (10 min). The live value is chosen
+// from HA ("Update Interval" select) and persisted in NVS -- this is only
+// what a fresh/factory-reset device starts with. expire_after in the HA
+// discovery configs is derived from the chosen interval (3x), not set here.
 const uint64_t SLEEP_INTERVAL_US = 10ULL * 60 * 1000000ULL;
-const uint32_t EXPIRE_AFTER_SEC = (SLEEP_INTERVAL_US / 1000000ULL) * 3;
 const uint32_t OTA_WINDOW_MS = 10UL * 60 * 1000UL;
 const uint32_t AWAKE_WATCHDOG_TIMEOUT_MS = 90UL * 1000UL;
 const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;

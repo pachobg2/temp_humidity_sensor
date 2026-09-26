@@ -64,6 +64,8 @@ String TOPIC_BATTERY_LOW  = String("home/") + DEVICE_ID + "/battery_low";
 String TOPIC_BOOT_COUNT   = String("home/") + DEVICE_ID + "/boot_count";
 String TOPIC_FW_VERSION = String("home/") + DEVICE_ID + "/firmware_version";
 String TOPIC_UPTIME = String("home/") + DEVICE_ID + "/uptime";
+String TOPIC_UPDATE_INTERVAL = String("home/") + DEVICE_ID + "/update_interval";
+String TOPIC_UPDATE_INTERVAL_SET = String("home/") + DEVICE_ID + "/update_interval/set";
 String TOPIC_LAST_FULL_CHARGE = String("home/") + DEVICE_ID + "/last_full_charge";
 
 // Home Assistant MQTT discovery topics
@@ -81,6 +83,7 @@ String DISCOVERY_BATTERY_LOW  = String("homeassistant/binary_sensor/") + DEVICE_
 String DISCOVERY_BOOT_COUNT   = String("homeassistant/sensor/") + DEVICE_ID + "/boot_count/config";
 String DISCOVERY_FW_VERSION = String("homeassistant/sensor/") + DEVICE_ID + "/firmware_version/config";
 String DISCOVERY_UPTIME = String("homeassistant/sensor/") + DEVICE_ID + "/uptime/config";
+String DISCOVERY_UPDATE_INTERVAL = String("homeassistant/select/") + DEVICE_ID + "/update_interval/config";
 String DISCOVERY_LAST_FULL_CHARGE = String("homeassistant/sensor/") + DEVICE_ID + "/last_full_charge/config";
 
 // ---------------- Persisted state (survives deep sleep) ----------------
@@ -116,6 +119,44 @@ uint32_t uptimeSeconds() {
   return (uint32_t)((esp_clk_rtc_time() - g_uptimeStartUs) / 1000000ULL);
 }
 
+// ---------------- Update interval ----------------
+// How long the device sleeps between readings. Chosen from HA (an "Update
+// Interval" select entity) and persisted in NVS; SLEEP_INTERVAL_US in
+// config.h is only the default before a choice is made. A choice is picked
+// up on a wake (the retained command is seen then), so a change from HA takes
+// up to one old interval to arrive; it applies to the sleep that follows.
+// expire_after in the HA discovery configs follows the chosen interval (see
+// expireAfterSec()), so a slower interval doesn't make the entities flap
+// "unavailable" between wakes.
+static const uint16_t UPDATE_INTERVAL_OPTIONS_MIN[] = {1, 2, 5, 10, 15, 30, 60};
+static const uint8_t UPDATE_INTERVAL_OPTION_COUNT = sizeof(UPDATE_INTERVAL_OPTIONS_MIN) / sizeof(UPDATE_INTERVAL_OPTIONS_MIN[0]);
+uint16_t g_updateIntervalMin = (uint16_t)(SLEEP_INTERVAL_US / 60000000ULL);
+Preferences intervalPrefs;
+
+bool isValidUpdateInterval(uint16_t minutes) {
+  for (uint8_t i = 0; i < UPDATE_INTERVAL_OPTION_COUNT; i++) {
+    if (UPDATE_INTERVAL_OPTIONS_MIN[i] == minutes) return true;
+  }
+  return false;
+}
+
+void loadUpdateInterval() {
+  intervalPrefs.begin("device", true);
+  uint16_t saved = intervalPrefs.getUShort("updateMin", g_updateIntervalMin);
+  intervalPrefs.end();
+  if (isValidUpdateInterval(saved)) g_updateIntervalMin = saved;
+}
+
+void saveUpdateInterval() {
+  intervalPrefs.begin("device", false);
+  intervalPrefs.putUShort("updateMin", g_updateIntervalMin);
+  intervalPrefs.end();
+}
+
+uint64_t sleepIntervalUs() { return (uint64_t)g_updateIntervalMin * 60ULL * 1000000ULL; }
+uint32_t expireAfterSec() { return (uint32_t)g_updateIntervalMin * 60UL * 3UL; }
+String updateIntervalLabel() { return String(g_updateIntervalMin) + " min"; }
+
 // ---------------- Globals ----------------
 
 espMqttClient mqttClient;
@@ -141,6 +182,11 @@ void onMqttPublish(uint16_t packetId) {
 volatile bool g_otaRequestReceived = false;
 char g_otaRequestPayload[8] = {0};
 
+// Update interval select: a persistent retained command (not a one-shot
+// trigger like OTA above).
+volatile bool g_intervalCmdReceived = false;
+char g_intervalCmdPayload[12] = {0};
+
 void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, const char* topic,
                     const uint8_t* payload, size_t len, size_t index, size_t total) {
   if (TOPIC_OTA_REQUEST.equals(topic)) {
@@ -148,6 +194,11 @@ void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, cons
     memcpy(g_otaRequestPayload, payload, copyLen);
     g_otaRequestPayload[copyLen] = '\0';
     g_otaRequestReceived = true;
+  } else if (TOPIC_UPDATE_INTERVAL_SET.equals(topic)) {
+    size_t copyLen = len < sizeof(g_intervalCmdPayload) - 1 ? len : sizeof(g_intervalCmdPayload) - 1;
+    memcpy(g_intervalCmdPayload, payload, copyLen);
+    g_intervalCmdPayload[copyLen] = '\0';
+    g_intervalCmdReceived = true;
   }
 }
 
@@ -222,6 +273,7 @@ void setup() {
   }
 
   initUptime();
+  loadUpdateInterval();
   bootCount++;
 
   esp_reset_reason_t resetReason = esp_reset_reason();
@@ -307,6 +359,8 @@ void setup() {
       // it, with no extra blocking wait added on our part.
       g_otaRequestReceived = false;
       mqttClient.subscribe(TOPIC_OTA_REQUEST.c_str(), 1);
+      g_intervalCmdReceived = false;
+      mqttClient.subscribe(TOPIC_UPDATE_INTERVAL_SET.c_str(), 1);
 
       if (!discoverySent) {
         sendDiscoveryConfig();
@@ -322,6 +376,19 @@ void setup() {
         connectFailCount++;
         totalFailCount++;
       }
+
+      // Update interval: apply if valid and changed, then always echo the
+      // current value back so the entity reflects what's actually in use.
+      if (g_intervalCmdReceived) {
+        uint16_t requested = (uint16_t)atoi(g_intervalCmdPayload); // "10 min" -> 10
+        if (isValidUpdateInterval(requested) && requested != g_updateIntervalMin) {
+          g_updateIntervalMin = requested;
+          saveUpdateInterval();
+          Serial.printf("Update interval set to %u min via HA.\n", g_updateIntervalMin);
+          sendDiscoveryConfig(); // expire_after follows the chosen interval -- re-announce now, before sleeping
+        }
+      }
+      publishWithAck(TOPIC_UPDATE_INTERVAL.c_str(), updateIntervalLabel().c_str(), true);
 
       bool remoteOtaRequested = g_otaRequestReceived && strcmp(g_otaRequestPayload, "ON") == 0;
       if (remoteOtaRequested) {
@@ -510,7 +577,7 @@ void sendDiscoveryConfig() {
     + "\"unit_of_measurement\":\"°C\","
     + "\"state_class\":\"measurement\","
     + "\"suggested_display_precision\":2,"
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_TEMP + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_TEMP.c_str(), tempPayload.c_str(), true);
@@ -522,7 +589,7 @@ void sendDiscoveryConfig() {
     + "\"unit_of_measurement\":\"%\","
     + "\"state_class\":\"measurement\","
     + "\"suggested_display_precision\":1,"
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_HUMIDITY + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_HUMIDITY.c_str(), humPayload.c_str(), true);
@@ -534,7 +601,7 @@ void sendDiscoveryConfig() {
     + "\"unit_of_measurement\":\"V\","
     + "\"state_class\":\"measurement\","
     + "\"suggested_display_precision\":2,"
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_BATTERY_V + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_BATTERY_V.c_str(), battVPayload.c_str(), true);
@@ -546,7 +613,7 @@ void sendDiscoveryConfig() {
     + "\"unit_of_measurement\":\"%\","
     + "\"state_class\":\"measurement\","
     + "\"suggested_display_precision\":0,"
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_BATTERY_PCT + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_BATTERY_PCT.c_str(), battPctPayload.c_str(), true);
@@ -558,7 +625,7 @@ void sendDiscoveryConfig() {
     + "\"unit_of_measurement\":\"dBm\","
     + "\"state_class\":\"measurement\","
     + "\"entity_category\":\"diagnostic\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_RSSI + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_RSSI.c_str(), rssiPayload.c_str(), true);
@@ -568,7 +635,7 @@ void sendDiscoveryConfig() {
     + "\"unique_id\":\"" + DEVICE_ID + "_last_update\","
     + "\"device_class\":\"timestamp\","
     + "\"entity_category\":\"diagnostic\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_LAST_UPDATE + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_LAST_UPDATE.c_str(), lastUpdatePayload.c_str(), true);
@@ -578,7 +645,7 @@ void sendDiscoveryConfig() {
     + "\"unique_id\":\"" + DEVICE_ID + "_reset_reason\","
     + "\"entity_category\":\"diagnostic\","
     + "\"icon\":\"mdi:restart-alert\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_RESET_REASON + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_RESET_REASON.c_str(), resetReasonPayload.c_str(), true);
@@ -589,7 +656,7 @@ void sendDiscoveryConfig() {
     + "\"entity_category\":\"diagnostic\","
     + "\"state_class\":\"measurement\","
     + "\"icon\":\"mdi:wifi-alert\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_FAIL_COUNT + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_FAIL_COUNT.c_str(), failCountPayload.c_str(), true);
@@ -600,7 +667,7 @@ void sendDiscoveryConfig() {
     + "\"entity_category\":\"diagnostic\","
     + "\"state_class\":\"total_increasing\","
     + "\"icon\":\"mdi:counter\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_TOTAL_FAIL_COUNT + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_TOTAL_FAIL_COUNT.c_str(), totalFailCountPayload.c_str(), true);
@@ -610,7 +677,7 @@ void sendDiscoveryConfig() {
     + "\"unique_id\":\"" + DEVICE_ID + "_firmware_version\","
     + "\"entity_category\":\"diagnostic\","
     + "\"icon\":\"mdi:chip\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_FW_VERSION + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_FW_VERSION.c_str(), fwVersionPayload.c_str(), true);
@@ -622,7 +689,7 @@ void sendDiscoveryConfig() {
     + "\"entity_category\":\"diagnostic\","
     + "\"payload_on\":\"ON\","
     + "\"payload_off\":\"OFF\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_BATTERY_LOW + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_BATTERY_LOW.c_str(), battLowPayload.c_str(), true);
@@ -647,7 +714,7 @@ void sendDiscoveryConfig() {
     + "\"entity_category\":\"diagnostic\","
     + "\"state_class\":\"total_increasing\","
     + "\"icon\":\"mdi:counter\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_BOOT_COUNT + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_BOOT_COUNT.c_str(), bootCountPayload.c_str(), true);
@@ -661,10 +728,32 @@ void sendDiscoveryConfig() {
     + "\"device_class\":\"duration\","
     + "\"state_class\":\"measurement\","
     + "\"entity_category\":\"diagnostic\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"expire_after\":" + String(expireAfterSec()) + ","
     + "\"state_topic\":\"" + TOPIC_UPTIME + "\","
     + devBlock + "}";
   publishWithAck(DISCOVERY_UPTIME.c_str(), uptimePayload.c_str(), true);
+
+  // Update Interval (select): how long the device sleeps between readings.
+  // "retain":true makes HA publish the command retained, so a choice made
+  // while this device sleeps is still on the broker when it next wakes.
+  String intervalOptions = "[";
+  for (uint8_t i = 0; i < UPDATE_INTERVAL_OPTION_COUNT; i++) {
+    if (i) intervalOptions += ",";
+    intervalOptions += String("\"") + UPDATE_INTERVAL_OPTIONS_MIN[i] + " min\"";
+  }
+  intervalOptions += "]";
+  String updateIntervalPayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Update Interval\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_update_interval\","
+    + "\"entity_category\":\"config\","
+    + "\"icon\":\"mdi:timer-cog-outline\","
+    + "\"options\":" + intervalOptions + ","
+    + "\"optimistic\":false,"
+    + "\"retain\":true,"
+    + "\"command_topic\":\"" + TOPIC_UPDATE_INTERVAL_SET + "\","
+    + "\"state_topic\":\"" + TOPIC_UPDATE_INTERVAL + "\","
+    + devBlock + "}";
+  publishWithAck(DISCOVERY_UPDATE_INTERVAL.c_str(), updateIntervalPayload.c_str(), true);
 
   // Note: no expire_after here -- this is a control, not a reading, and
   // should stay usable in the UI even if the device has been quiet a while.
@@ -991,7 +1080,7 @@ void enterOtaMode() {
 // ---------------- Sleep ----------------
 
 void goToSleep() {
-  esp_sleep_enable_timer_wakeup(SLEEP_INTERVAL_US);
+  esp_sleep_enable_timer_wakeup(sleepIntervalUs());
 
   // Wake immediately if the OTA button is pressed, rather than waiting for
   // the next scheduled timer wake. The ESP32-C3 has no separate RTC IO
